@@ -1,0 +1,35 @@
+# Checks whether CBSL's website answers requests from GitHub's servers.
+# Run it from the repo's Actions tab: "CBSL access test" -> "Run workflow".
+name: CBSL access test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fast raw check without R: status code, type, size and time per page.
+      # Never fails the job; the R step below decides pass or fail.
+      - name: Quick check with curl
+        run: |
+          for url in \
+            "https://www.cbsl.gov.lk/en/statistics/economic-indicators/daily-indicators" \
+            "https://www.cbsl.gov.lk/en/statistics/economic-indicators/daily-indicators?page=1"; do
+            curl -sS -o /dev/null -A "Mozilla/5.0 (R research script)" --max-time 60 \
+              -w "HTTP %{http_code}  %{content_type}  %{size_download} bytes  %{time_total} s  $url\n" \
+              "$url" || echo "curl could not connect to $url"
+          done
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: any::httr, any::rvest
+
+      - name: Full check with R
+        run: Rscript tools/cbsl_access_test.R
