@@ -11,8 +11,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Browser-like request
+        run: |
+          curl -sS https://api.ipify.org; echo
+          curl -sS -o /dev/null -w "HTTP %{http_code}\n" --max-time 60 \
+            -A "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36" \
+            -H "Accept: text/html,application/xhtml+xml" \
+            -H "Accept-Language: en-US,en;q=0.9" \
+            "https://www.cbsl.gov.lk/en/statistics/economic-indicators/daily-indicators"
+
       # Fast raw check without R: status code, type, size and time per page.
       # Never fails the job; the R step below decides pass or fail.
+      
       - name: Quick check with curl
         run: |
           for url in \
