@@ -14,7 +14,7 @@ on:
   repository_dispatch:
     types: [new-pdfs]
   schedule:
-    - cron: "45 14 * * *"          
+    - cron: "00 15 * * *"          
   workflow_dispatch:
     inputs:
       reprocess:
