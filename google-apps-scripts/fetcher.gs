@@ -2,26 +2,27 @@
  * CBSL PDF fetcher (Google Apps Script).
  *
  * CBSL blocks GitHub's servers but answers Google's, so this script does only
- * the downloading. Twice a day it:
+ * the downloading. Every hour it:
  *   1. asks GitHub which CBSL PDF was processed last (electricity_meta.json,
  *      or the CSV's last date if that file is missing),
  *   2. reads CBSL's listing pages for newer daily-indicator PDFs,
  *   3. uploads each new PDF to the GitHub release "inbox",
  *   4. tells GitHub to start the "process-inbox" workflow, which parses them.
  *
- * CBSL sometimes refuses a request from Google's servers (HTTP 403) and
- * accepts the same request a little later. So every CBSL request is retried a
- * few times, and a run that still cannot reach CBSL does not email you: the
- * next run catches up. You get an email only after CONFIG.FAILS_BEFORE_ALERT
- * failed runs in a row, or at once for problems on the GitHub side (token).
+ * CBSL refuses some of Google's servers (HTTP 403), and each run is handled
+ * by one of them. So a refused request is retried a few times, and a run that
+ * still cannot reach CBSL does not email you: the next run, usually on another
+ * server, catches up. Each run uploads at most CONFIG.MAX_PDFS_PER_RUN PDFs,
+ * so a backlog is cleared over the next few runs. You get an email only after
+ * CONFIG.FAILS_BEFORE_ALERT failed runs in a row, or for problems on the
+ * GitHub side (token).
  *
  * One-time setup is in SETUP.md. In short:
  *   - fill in CONFIG below,
  *   - Project Settings -> Script properties -> add GITHUB_TOKEN,
  *   - run "fetchNewPdfs" once to check it works,
- *   - Triggers (clock icon) -> add two daily "Time-driven" triggers for
- *     fetchNewPdfs: 11am to noon (CBSL publishes around 10am) and 8pm to
- *     9pm (catches a late upload or a refused morning run), Colombo time.
+ *   - Triggers (clock icon) -> add one "Time-driven" trigger for
+ *     fetchNewPdfs: Hour timer, every hour. It is the only trigger needed.
  */
 
 // ---- CONFIG -----------------------------------------------------------------
@@ -46,8 +47,8 @@ var CONFIG = {
   PAUSE_MS: 1500,           // pause between requests to CBSL
 
   RETRY_WAITS_S: [10, 30, 60],   // seconds to wait before each retry of a refused CBSL request
-  FAILS_BEFORE_ALERT: 4,         // email only after this many runs in a row could not reach CBSL
-                                 // (4 = two days with two runs a day)
+  FAILS_BEFORE_ALERT: 12,        // email only after this many runs in a row could not reach CBSL
+                                 // (12 = 12 hours with the hourly trigger)
   TIME_BUDGET_MS: 4 * 60 * 1000  // start no CBSL request after 4 min (Apps Script stops at 6)
 };
 
