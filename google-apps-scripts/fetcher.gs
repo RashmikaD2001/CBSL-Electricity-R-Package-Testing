@@ -3,7 +3,8 @@
  *
  * CBSL blocks GitHub's servers but answers Google's, so this script does only
  * the downloading. Twice a day it:
- *   1. asks GitHub which CBSL PDF was processed last (electricity_meta.json),
+ *   1. asks GitHub which CBSL PDF was processed last (electricity_meta.json,
+ *      or the CSV's last date if that file is missing),
  *   2. reads CBSL's listing pages for newer daily-indicator PDFs,
  *   3. uploads each new PDF to the GitHub release "inbox",
  *   4. tells GitHub to start the "process-inbox" workflow, which parses them.
@@ -19,7 +20,8 @@
  *   - Project Settings -> Script properties -> add GITHUB_TOKEN,
  *   - run "fetchNewPdfs" once to check it works,
  *   - Triggers (clock icon) -> add two daily "Time-driven" triggers for
- *     fetchNewPdfs (e.g. 11am to noon and 4pm to 5pm, Colombo time).
+ *     fetchNewPdfs: 11am to noon (CBSL publishes around 10am) and 8pm to
+ *     9pm (catches a late upload or a refused morning run), Colombo time.
  */
 
 // ---- CONFIG -----------------------------------------------------------------
@@ -28,15 +30,18 @@ var CONFIG = {
   GITHUB_OWNER: 'RashmikaD2001',
   GITHUB_REPO: 'CBSL-Electricity-R-Package-Testing',
   BRANCH: 'main',
-  // The meta file sits next to the CSV (DATA_CSV in process-inbox.yml).
-  // Use 'inst/extdata/electricity_meta.json' once this is an R package.
-  META_PATH: 'dataraw/electricity_meta.json',
+  // The published CSV: must be the same as DATA_CSV in process-inbox.yml.
+  // electricity_meta.json is read from the same folder.
+  // Use 'inst/extdata/electricity.csv' once this is an R package.
+  DATA_CSV: 'dataraw/electricity_generation_data.csv',
 
-  // Used only while the repo has no meta file yet. Normally you run the
-  // process-inbox workflow once first, which creates it from the CSV.
-  FIRST_RUN_FROM: '2026-11-06',
+  // Where to continue from is read from the meta file; if that is missing,
+  // from the CSV's last date. Only for a brand-new repo with neither: the
+  // date of the first PDF to fetch, e.g. '2026-11-06'. Leave '' otherwise.
+  FIRST_RUN_FROM: '',
 
-  MAX_PAGES: 3,             // listing pages to read per run (12 PDFs per page)
+  MAX_PAGES: 30,            // safety limit only: the fetcher reads listing pages until it
+                            // reaches the last processed PDF (12 PDFs per page, 30 = ~18 months)
   MAX_PDFS_PER_RUN: 15,     // keeps one run well under Apps Script's 6-minute limit
   PAUSE_MS: 1500,           // pause between requests to CBSL
 
@@ -67,13 +72,11 @@ CbslError_.prototype.name = 'CbslError';
  */
 function fetchNewPdfs() {
   deadline_ = Date.now() + CONFIG.TIME_BUDGET_MS;
-  var meta = readMeta_();
-  var isNew = meta && meta.last_pdf_date
-    ? function (d) { return d > meta.last_pdf_date; }
-    : function (d) { return d >= CONFIG.FIRST_RUN_FROM; };
-  Logger.log(meta && meta.last_pdf_date
-    ? 'Last processed PDF is dated ' + meta.last_pdf_date
-    : 'No meta file yet; fetching PDFs dated from ' + CONFIG.FIRST_RUN_FROM);
+  var start = startingPoint_();
+  var isNew = start.after
+    ? function (d) { return d > start.after; }
+    : function (d) { return d >= start.from; };
+  Logger.log(start.why);
 
   var inbox = getOrCreateRelease_(INBOX_TAG, 'PDF inbox (automatic)',
     'New CBSL PDFs waiting to be parsed. Filled by the Apps Script fetcher, ' +
@@ -84,17 +87,19 @@ function fetchNewPdfs() {
 
   var cbslProblem = null, links = [];
   try {
-    links = newLinks_(isNew).filter(function (l) {
+    links = newLinks_(isNew, !!start.after).filter(function (l) {
       return waiting.indexOf(l.name) === -1 && parked.indexOf(l.name) === -1;
     });
   } catch (e) {
     if (!e.isCbsl) throw e;
     cbslProblem = e.message;
   }
-  links = links.slice(0, CONFIG.MAX_PDFS_PER_RUN);
   if (!cbslProblem) {
-    Logger.log(links.length + ' new PDF(s) to fetch, ' + waiting.length + ' already waiting in the inbox');
+    Logger.log(links.length + ' new PDF(s) to fetch, ' + waiting.length + ' already waiting in the inbox' +
+      (links.length > CONFIG.MAX_PDFS_PER_RUN
+        ? '; fetching the oldest ' + CONFIG.MAX_PDFS_PER_RUN + ' now, the rest in the next runs' : ''));
   }
+  links = links.slice(0, CONFIG.MAX_PDFS_PER_RUN);
 
   for (var i = 0; i < links.length; i++) {
     var l = links[i];
@@ -198,29 +203,55 @@ function dateFromName_(name) {
   return null;
 }
 
-/** New PDF links, oldest first. Stops at the first page that reaches old PDFs. */
-function newLinks_(isNew) {
+/**
+ * Every new PDF link, oldest first. Reads listing pages (newest first) until
+ * it reaches a PDF that was already processed, however many pages back that
+ * is, so a long break never leaves a gap.
+ *
+ * mustReachOld: true once there is a last processed PDF. If the listing ends,
+ * or CONFIG.MAX_PAGES is hit, before reaching it, nothing is returned (and so
+ * nothing is uploaded) rather than risk skipping the PDFs not seen.
+ */
+function newLinks_(isNew, mustReachOld) {
   var found = {}, re = /href="([^"]*(?:daily_economic_indicators_|DEI_)[^"]*\.pdf)"/gi;
-  for (var page = 0; page < CONFIG.MAX_PAGES; page++) {
+  var prevFirst = null, reachedOld = false, page;
+  for (page = 0; page < CONFIG.MAX_PAGES && !reachedOld; page++) {
+    if (Date.now() > deadline_) {
+      throw new CbslError_('Ran out of time on CBSL listing page ' + page + ' before reaching the last processed PDF');
+    }
     if (page > 0) Utilities.sleep(CONFIG.PAUSE_MS);
     var url = page === 0 ? LISTING_URL : LISTING_URL + '?page=' + page;
     var resp = fetchCbsl_(url, 'CBSL listing page ' + page);
-    var html = resp.getContentText(), m, onPage = 0, reachedOld = false;
+    var html = resp.getContentText(), m, onPage = [];
     re.lastIndex = 0;
     while ((m = re.exec(html)) !== null) {
       var link = m[1].indexOf('http') === 0 ? m[1] : CBSL_BASE + m[1];
       var name = link.split('/').pop();
       var date = dateFromName_(name);
       if (!date) continue;
-      onPage++;
+      onPage.push(name);
       if (isNew(date)) found[name] = { name: name, url: link, date: date };
       else reachedOld = true;
     }
-    if (onPage === 0) throw new CbslError_('No PDF links found on CBSL listing page ' + page + '; has the page changed?');
-    if (reachedOld) break;
+    if (onPage.length === 0) {
+      if (page === 0) throw new CbslError_('No PDF links found on CBSL listing page 0; has the page changed?');
+      break;                                   // past the last listing page
+    }
+    if (onPage[0] === prevFirst) break;        // CBSL repeated the last page
+    prevFirst = onPage[0];
   }
-  return Object.keys(found).map(function (k) { return found[k]; })
+
+  if (!reachedOld && mustReachOld) {
+    if (page >= CONFIG.MAX_PAGES) {
+      throw new Error('All PDFs on the first ' + CONFIG.MAX_PAGES + ' CBSL listing pages are new. ' +
+        'Nothing was uploaded, so nothing was skipped. Raise MAX_PAGES in CONFIG and run fetchNewPdfs again.');
+    }
+    throw new CbslError_('The CBSL listing ended on page ' + page + ' before reaching the last processed PDF');
+  }
+  var links = Object.keys(found).map(function (k) { return found[k]; })
     .sort(function (a, b) { return a.date < b.date ? -1 : a.date > b.date ? 1 : 0; });
+  Logger.log('Read ' + page + ' listing page(s): ' + links.length + ' PDF(s) newer than the last processed one');
+  return links;
 }
 
 // ---- GitHub -----------------------------------------------------------------
@@ -251,16 +282,62 @@ function github_(method, path, body, allow404) {
   return text ? JSON.parse(text) : {};
 }
 
-/** The repo's meta file, read through the API (no 5-minute raw-file cache). */
-function readMeta_() {
+/** A file in the repo as text, or null if it does not exist. Read through the
+ *  API, which has no 5-minute cache like raw.githubusercontent.com. */
+function readRepoFile_(path) {
   var resp = UrlFetchApp.fetch(
     'https://api.github.com/repos/' + CONFIG.GITHUB_OWNER + '/' + CONFIG.GITHUB_REPO +
-    '/contents/' + CONFIG.META_PATH + '?ref=' + CONFIG.BRANCH,
+    '/contents/' + path + '?ref=' + CONFIG.BRANCH,
     { headers: { Authorization: 'Bearer ' + token_(), Accept: 'application/vnd.github.raw+json' },
       muteHttpExceptions: true });
   if (resp.getResponseCode() === 404) return null;
-  if (resp.getResponseCode() !== 200) throw new Error('Could not read ' + CONFIG.META_PATH + ': HTTP ' + resp.getResponseCode());
-  return JSON.parse(resp.getContentText());
+  if (resp.getResponseCode() !== 200) throw new Error('Could not read ' + path + ': HTTP ' + resp.getResponseCode());
+  return resp.getContentText();
+}
+
+function metaPath_() {
+  return CONFIG.DATA_CSV.replace(/[^\/]*$/, '') + 'electricity_meta.json';
+}
+
+/**
+ * Where this run continues from, in order of preference:
+ *   1. last_pdf_date in the meta file (normal case),
+ *   2. the CSV's last date, if the meta file is missing (e.g. a new repo the
+ *      CSV was copied to; the workflow then creates the meta file),
+ *   3. CONFIG.FIRST_RUN_FROM, for a brand-new repo with no CSV.
+ * Returns { after: date } (fetch PDFs newer than it) or { from: date }.
+ */
+function startingPoint_() {
+  var metaText = readRepoFile_(metaPath_());
+  var meta = metaText ? JSON.parse(metaText) : null;
+  if (meta && meta.last_pdf_date) {
+    return { after: meta.last_pdf_date, why: 'Last processed PDF is dated ' + meta.last_pdf_date };
+  }
+  var csv = readRepoFile_(CONFIG.DATA_CSV);
+  var last = csv ? lastCsvDate_(csv) : null;
+  if (last) {
+    return { after: last, why: 'No meta file at ' + metaPath_() + '; continuing after the last date in the CSV, ' + last };
+  }
+  if (CONFIG.FIRST_RUN_FROM) {
+    return { from: CONFIG.FIRST_RUN_FROM, why: 'No data in the repo yet; fetching PDFs dated from ' + CONFIG.FIRST_RUN_FROM };
+  }
+  throw new Error('Found neither ' + metaPath_() + ' nor a CSV with dates at ' + CONFIG.DATA_CSV +
+    ' in ' + CONFIG.GITHUB_OWNER + '/' + CONFIG.GITHUB_REPO + '. Check GITHUB_REPO and DATA_CSV in CONFIG ' +
+    'and that the token can access this repo. To start a new CSV instead, set FIRST_RUN_FROM.');
+}
+
+/** Latest date in the CSV's first column: YYYY-MM-DD, or m/d/yyyy as Excel saves it. */
+function lastCsvDate_(text) {
+  var max = null;
+  text.split(/\r?\n/).forEach(function (line) {
+    var cell = line.split(',')[0].replace(/"/g, '').trim(), m, iso = null;
+    if (/^\d{4}-\d{2}-\d{2}$/.test(cell)) iso = cell;
+    else if ((m = cell.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/))) {
+      iso = m[3] + '-' + ('0' + m[1]).slice(-2) + '-' + ('0' + m[2]).slice(-2);
+    }
+    if (iso && (max === null || iso > max)) max = iso;
+  });
+  return max;
 }
 
 function getRelease_(tag) {
