@@ -1,4 +1,4 @@
-# CBSL daily electricity data
+# CBSL daily electricity data - Testing repository
 
 Daily electricity generation figures for Sri Lanka, taken from the Central Bank
 of Sri Lanka's (CBSL) [Daily Economic Indicators](https://www.cbsl.gov.lk/en/statistics/economic-indicators/daily-indicators)
