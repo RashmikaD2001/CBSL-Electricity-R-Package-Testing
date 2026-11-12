@@ -14,7 +14,7 @@ on:
   repository_dispatch:
     types: [new-pdfs]
   schedule:
-    - cron: "30 6 * * *"          
+    - cron: "30 6 * * *"          # every day 06:30 UTC = 12:00 Sri Lanka
   workflow_dispatch:
     inputs:
       reprocess:
@@ -38,9 +38,14 @@ env:
 
 jobs:
   process:
-    runs-on: ubuntu-latest
+    # Pinned, not ubuntu-latest: that label moves to new Ubuntu versions, and on
+    # a new image installing R can hang or fail for a while. Move up on purpose.
+    runs-on: ubuntu-24.04
+    # A normal run takes 1-4 min. A stuck step fails here instead of blocking
+    # later runs for hours; its PDFs stay in the inbox for the next run.
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Download PDFs from the inbox
         run: |
