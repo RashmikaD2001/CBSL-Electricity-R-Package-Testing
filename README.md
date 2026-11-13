@@ -2,18 +2,23 @@
 
 Daily electricity generation figures for Sri Lanka, taken from the Central Bank
 of Sri Lanka's (CBSL) [Daily Economic Indicators](https://www.cbsl.gov.lk/en/statistics/economic-indicators/daily-indicators)
-PDFs and kept in one CSV. The CSV updates itself every working day; nobody has
-to download or type anything.
+PDFs and kept in two CSVs. Both update themselves every working day; nobody
+has to download or type anything.
 
 ## The data
 
-`dataraw/electricity_generation_data.csv`: one row per day, from 2020-09-02.
+| File | Rows | Columns |
+|---|---|---|
+| `dataraw/electricity_generation_data.csv` | **Full data:** one row for each day CBSL published a PDF (working days), from 2020-09-02 | All nine below |
+| `dataraw/electricity_energy_peak_data.csv` | **Energy and peak:** the same days, plus Sundays and holidays from 2022-08-04 | `date`, `total_energy_gwh`, `peak_demand_mw` |
 
-CBSL publishes a PDF on working days only. Since 4 Aug 2022 each PDF also shows
-the day before, so Sundays and holidays have a row too, with energy and peak
-demand only: the percentages come from a pie chart drawn for the PDF's own day.
-Saturdays, and the first day of a longer break, appear in no PDF and have no
-row.
+Since 4 Aug 2022 each PDF also shows the day before. On weekdays that day
+already has its own PDF; after a Sunday or a holiday it is the only place the
+day's energy and peak appear. Those days go into the energy-and-peak file only,
+because the percentages come from a pie chart drawn for the PDF's own day. For
+every day in the full data, both files have the same energy and peak.
+Saturdays, and the first day of a longer break, appear in no PDF and are in
+neither file.
 
 | Column | Meaning |
 |---|---|
@@ -34,14 +39,24 @@ it exists).
 Read it in R:
 
 ```r
-url  <- "https://raw.githubusercontent.com/RashmikaD2001/CBSL-Electricity-R-Package-Testing/main/dataraw/electricity_generation_data.csv"
-elec <- read.csv(url)
-elec$date <- as.Date(elec$date)
+base <- "https://raw.githubusercontent.com/RashmikaD2001/CBSL-Electricity-R-Package-Testing/main/dataraw/"
+elec <- read.csv(paste0(base, "electricity_generation_data.csv"))   # full data
+ep   <- read.csv(paste0(base, "electricity_energy_peak_data.csv"))  # energy and peak, more days
+elec$date <- as.Date(elec$date); ep$date <- as.Date(ep$date)
 ```
 
-`dataraw/electricity_meta.json` describes the CSV (last date, number of rows,
-MD5 checksum, when it last changed), so a program can check for new data
-without downloading the whole file.
+`dataraw/electricity_meta.json` describes both files (last date, number of
+rows and MD5 checksum of each, when they last changed), so a program can check
+for new data without downloading them:
+
+```json
+{"last_date": "2026-11-12", "rows": 1464, "md5": "8088...", "updated": "2026-11-13T10:35:48Z",
+ "last_pdf_date": "2026-11-12",
+ "energy_peak_last_date": "2026-11-12", "energy_peak_rows": 1722, "energy_peak_md5": "58be..."}
+```
+
+`last_date`, `rows` and `md5` are the full data's; `last_pdf_date` is the
+newest PDF processed, which the fetcher continues from.
 
 The figures are CBSL's; this repository only extracts them from the PDFs.
 
@@ -55,7 +70,7 @@ Google Apps Script  (google-apps-scripts/fetcher.gs, every hour)
   reads CBSL's listing pages -> downloads new PDFs -> uploads them to the
   GitHub release "inbox" -> starts the process-inbox workflow
 GitHub Actions  (process-inbox.yml, never contacts CBSL)
-  parses the PDFs in R -> adds rows to the CSV, updates electricity_meta.json
+  parses the PDFs in R -> adds rows to both CSVs, updates electricity_meta.json
   -> commits -> empties the inbox
 ```
 
@@ -89,7 +104,8 @@ failed workflows" ticked.
 
 | Path in the repo | What it is |
 |---|---|
-| `dataraw/electricity_generation_data.csv` | The data. The pipeline adds rows to it |
+| `dataraw/electricity_generation_data.csv` | The full data. The pipeline adds rows to it |
+| `dataraw/electricity_energy_peak_data.csv` | Energy and peak for more days. Written by the workflow from the full data plus the day-before columns; correct values in the full data, and the next run copies them here |
 | `dataraw/electricity_meta.json` | Written by the workflow; don't create or edit it. If it goes missing, the fetcher uses the CSV's last date and the next workflow run recreates it |
 | `dataraw/problems.csv` | Made only when a PDF needed a safeguard |
 | `.github/workflows/process-inbox.yml` | The GitHub half |
@@ -218,9 +234,9 @@ From then on nothing needs you unless an email arrives.
 ### The whole pipeline: rebuild removed days
 
 1. In **one commit**, delete `dataraw/electricity_meta.json` and the last rows
-   of the CSV (for example every row after a chosen date). Note the commit
-   before it. Delete both together: if the meta file stays, the fetcher
-   continues from its date and does not fetch the removed days.
+   of both CSVs (for example every row after a chosen date). Note the commit
+   before it. Delete the meta file too: if it stays, the fetcher continues from
+   its date and does not fetch the removed days.
 2. Wait for the hourly trigger, or run **fetchNewPdfs** by hand. The first run
    logs `No meta file ...; continuing after the last date in the CSV, <date>`.
    Each run uploads the oldest 15 missing PDFs, so 60 removed days take 4 or 5
@@ -232,7 +248,7 @@ From then on nothing needs you unless an email arrives.
    from step 1:
 
    ```
-   git diff <commit-before-the-test> -- dataraw/electricity_generation_data.csv
+   git diff <commit-before-the-test> -- dataraw/*.csv
    ```
 
    The only difference should be rows for days CBSL published after the test
@@ -310,13 +326,13 @@ and `install.packages("pdftools")`.
 Rscript tools/download_pdfs.R 2022-08-04 2026-11-13 ../cbsl_pdfs
 git pull
 Rscript tools/process_inbox.R ../cbsl_pdfs dataraw/electricity_generation_data.csv
-git diff --numstat dataraw/electricity_generation_data.csv
+git diff --numstat dataraw/*.csv
 ```
 
 Keep the PDF folder outside the repo. The download can be stopped and run
 again; it skips PDFs it already has. Reprocessing leaves existing rows as they
-are and only adds missing dates, so the second number from `git diff --numstat`
-(lines removed) must be 0. Then commit `dataraw/` and push. The script writes
+are and only adds missing dates, so the second number of each line from
+`git diff --numstat` (lines removed) must be 0. Then commit `dataraw/` and push. The script writes
 `\n` line ends on every system, so the md5 in the meta file matches the file
 GitHub stores.
 
@@ -349,8 +365,9 @@ the **target repo's** own CSV, so a move cannot lose or skip days: anything the
 old repo processed after you copied the CSV is simply fetched again for the new
 one.
 
-1. **New repo:** copy the CSV (and `electricity_meta.json` if you like; it is
-   optional), `.github/workflows/process-inbox.yml` and the R scripts. If the
+1. **New repo:** copy both CSVs (and `electricity_meta.json` if you like; it is
+   optional; without the energy-and-peak CSV, its Sundays and holidays before
+   the move are lost), `.github/workflows/process-inbox.yml` and the R scripts. If the
    path changes (e.g. `inst/extdata/electricity.csv`), set `DATA_CSV` in the
    workflow. Commit and push.
 2. **Token:** GitHub -> Settings -> Developer settings -> Fine-grained tokens ->
