@@ -13,12 +13,20 @@
 # Dates in the CSV are written as YYYY-MM-DD. A CSV saved by Excel as
 # m/d/yyyy (e.g. 11/5/2026) is read correctly and converted on the next write.
 #
+# The PDFs are handled one at a time, oldest first, and each one's rows go into
+# the CSV before the next PDF is read:
+#   * the PDF's own date: added, or replaces the row for that date
+#   * the "day before" column (PDFs from 4 Aug 2022 on show two dates): added
+#     only if the CSV has no row for that date yet, with energy and peak only.
+#     This fills Sundays and holidays, which have no PDF of their own; a day
+#     already in the CSV is never changed by another PDF's column.
+#
 # Safeguards (the feed is never blocked by one bad PDF, and nothing is guessed):
 #   * no date or no total energy        -> row skipped, logged
 #   * energy or peak outside its range  -> that value left empty, logged
 #   * percentages do not sum to ~100 or
 #     labels and numbers do not match   -> percentages left empty, logged
-#   * a problem row never replaces a good row already in the CSV
+#   * a problem row never replaces a row already in the CSV
 #
 # Also run with an empty inbox: it then only refreshes the meta file if the
 # CSV was edited by hand (for example a correction), so clients see the change.
@@ -85,7 +93,7 @@ if ((is.na(last_pdf_date) || !nzchar(last_pdf_date)) && nrow(old)) {
   last_pdf_date <- format(max(old$date))
 }
 
-# ---- parse the inbox ------------------------------------------------------------
+# ---- parse the inbox, one PDF at a time ---------------------------------------
 
 pdfs <- list.files(inbox, pattern = PDF_RE, full.names = TRUE, ignore.case = TRUE)
 pdfs <- pdfs[order(vapply(basename(pdfs), function(f) format(date_from_filename(f)), ""))]
@@ -98,60 +106,98 @@ log_problem <- function(date, file, reason) {
                                          format(Sys.time(), "%Y-%m-%d %H:%M:%S", tz = "UTC"))
 }
 
-new_rows <- list()
-for (f in pdfs) {
-  row <- tryCatch(extract_electricity_data(f),
-                  error = function(e) empty_row(basename(f), note = conditionMessage(e)))
-  name <- basename(f)
+out <- old                   # the CSV as it grows, one PDF at a time
+n_added <- 0L; n_replaced <- 0L; n_prev <- 0L
 
-  if (is.na(row$date) || is.na(row$total_energy_gwh)) {
-    log_problem(row$date, name, paste("skipped: no date or total energy found;",
-                                      if (is.na(row$note)) "" else row$note))
-    next
+in_csv <- function(d) any(out$date == d)
+
+# Add a row, or replace the row for its date.
+put_row <- function(row) {
+  i <- which(out$date == row$date)
+  if (length(i)) {
+    out[i, CSV_COLS] <<- row[, CSV_COLS]
+    n_replaced <<- n_replaced + 1L
+  } else {
+    out <<- rbind(out, row[, CSV_COLS])
+    n_added <<- n_added + 1L
   }
-  if (row$date > Sys.Date() + 1L) {
-    log_problem(row$date, name, "skipped: date is in the future")
-    next
-  }
-  if (row$total_energy_gwh < 5 || row$total_energy_gwh > 300) {
-    log_problem(row$date, name, sprintf("total energy %s GWh outside 5-300; left empty", row$total_energy_gwh))
+}
+
+# Energy or peak outside its range: that value left empty, logged.
+check_ranges <- function(row, name, label = "") {
+  if (!is.na(row$total_energy_gwh) && (row$total_energy_gwh < 5 || row$total_energy_gwh > 300)) {
+    log_problem(row$date, name, sprintf("%stotal energy %s GWh outside 5-300; left empty", label, row$total_energy_gwh))
     row$total_energy_gwh <- NA
   }
   if (!is.na(row$peak_demand_mw) && (row$peak_demand_mw < 300 || row$peak_demand_mw > 10000)) {
-    log_problem(row$date, name, sprintf("peak demand %s MW outside 300-10000; left empty", row$peak_demand_mw))
+    log_problem(row$date, name, sprintf("%speak demand %s MW outside 300-10000; left empty", label, row$peak_demand_mw))
     row$peak_demand_mw <- NA
   }
+  row
+}
+
+# The PDF's own date: added, or replaces the row for that date, except that a
+# problem row never replaces a row already in the CSV.
+add_own_date <- function(row, name) {
+  if (is.na(row$date) || is.na(row$total_energy_gwh)) {
+    log_problem(row$date, name, paste("skipped: no date or total energy found;",
+                                      if (is.na(row$note)) "" else row$note))
+    return(invisible())
+  }
+  if (row$date > Sys.Date() + 1L) {
+    log_problem(row$date, name, "skipped: date is in the future")
+    return(invisible())
+  }
+  row <- check_ranges(row, name)
   if (!is.na(row$note)) {
     log_problem(row$date, name, paste("percentages left empty:", row$note))
     row[PCT_COLS] <- NA
   }
-  row$ok <- is.na(row$note) && !is.na(row$total_energy_gwh) && !is.na(row$peak_demand_mw)
-  new_rows[[length(new_rows) + 1L]] <- row[, c(CSV_COLS, "ok")]
+  ok <- is.na(row$note) && !is.na(row$total_energy_gwh) && !is.na(row$peak_demand_mw)
+  if (!ok && in_csv(row$date)) return(invisible())
+  put_row(row)
 }
 
-# ---- merge: new rows replace old ones, except a problem row never replaces a good one
-
-if (length(new_rows)) {
-  new <- do.call(rbind, new_rows)
-  new <- new[order(new$date, !new$ok), ]
-  new <- new[!duplicated(new$date), ]
-  keep_old <- new$date %in% old$date & !new$ok
-  new <- new[!keep_old, CSV_COLS]
-  out <- rbind(old[!old$date %in% new$date, ], new)
-} else {
-  out <- old
+# The "day before" column: only for a date the CSV does not have yet.
+add_day_before <- function(row, name) {
+  if (is.na(row$date) || in_csv(row$date)) return(invisible())
+  row <- check_ranges(row, name, "day-before column: ")
+  if (is.na(row$total_energy_gwh) && is.na(row$peak_demand_mw)) return(invisible())
+  row[PCT_COLS] <- NA        # the pie chart is for the PDF's own day only
+  put_row(row)
+  n_prev <<- n_prev + 1L
 }
+
+for (f in pdfs) {
+  name <- basename(f)
+  rows <- tryCatch(extract_electricity_data(f),
+                   error = function(e) empty_row(name, note = conditionMessage(e)))
+  add_own_date(rows[!rows$is_previous, , drop = FALSE][1L, ], name)
+  prev <- rows[rows$is_previous, , drop = FALSE]
+  if (nrow(prev)) add_day_before(prev[1L, ], name)
+}
+
 out <- out[order(out$date), ]
 rownames(out) <- NULL
 
 # ---- write ------------------------------------------------------------------
 
-changed <- length(new_rows) > 0L || !file.exists(csv_path) || rewrite_dates
+# Files are written with "\n" line ends on every system (through a binary
+# connection), so a run on Windows gives the same bytes, and the same md5, as a
+# run on GitHub. A CSV checked out with Windows line ends is rewritten.
+write_lf <- function(path, writer, append = FALSE) {
+  con <- file(path, if (append) "ab" else "wb")
+  on.exit(close(con))
+  writer(con)
+}
+has_cr <- function(path) file.exists(path) && any(readBin(path, "raw", file.size(path)) == as.raw(13L))
+
+changed <- n_added + n_replaced > 0L || !file.exists(csv_path) || rewrite_dates || has_cr(csv_path)
 if (rewrite_dates) cat("Converting dates in the CSV to YYYY-MM-DD.\n")
 if (changed) {
   write_out <- out
   write_out$date <- format(write_out$date, "%Y-%m-%d")
-  write.csv(write_out, csv_path, row.names = FALSE, na = "")
+  write_lf(csv_path, function(con) write.csv(write_out, con, row.names = FALSE, na = ""))
 }
 
 md5 <- unname(tools::md5sum(csv_path))
@@ -161,22 +207,24 @@ pdf_dates <- pdf_dates[!is.na(pdf_dates) & nzchar(pdf_dates)]
 new_last_pdf <- if (length(pdf_dates)) max(pdf_dates) else ""
 
 if (changed || !identical(meta_field("md5"), md5) || !identical(meta_field("last_pdf_date"), new_last_pdf)) {
-  writeLines(sprintf(
+  meta <- sprintf(
     '{"last_date": "%s", "rows": %d, "md5": "%s", "updated": "%s", "last_pdf_date": "%s"}',
     if (nrow(out)) format(max(out$date)) else "", nrow(out), md5,
-    format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"), new_last_pdf), meta_path)
+    format(Sys.time(), "%Y-%m-%dT%H:%M:%SZ", tz = "UTC"), new_last_pdf)
+  write_lf(meta_path, function(con) writeLines(meta, con))
   cat("Meta file updated.\n")
 }
 
 problem_files <- unique(problems$source_file)
-writeLines(problem_files, file.path(inbox, "problem_files.txt"))
+write_lf(file.path(inbox, "problem_files.txt"), function(con) writeLines(problem_files, con))
 if (nrow(problems)) {
-  write.table(problems, prob_path, sep = ",", row.names = FALSE, qmethod = "double",
-              col.names = !file.exists(prob_path), append = file.exists(prob_path))
+  had_problems <- file.exists(prob_path)
+  write_lf(prob_path, append = had_problems, function(con)
+    write.table(problems, con, sep = ",", row.names = FALSE, qmethod = "double", col.names = !had_problems))
 }
 
-cat(sprintf("Rows added or replaced: %d | rows in CSV: %d | last date: %s\n",
-            length(new_rows), nrow(out), if (nrow(out)) format(max(out$date)) else "none"))
+cat(sprintf("Rows added: %d (%d from a day-before column) | replaced: %d | rows in CSV: %d | last date: %s\n",
+            n_added, n_prev, n_replaced, nrow(out), if (nrow(out)) format(max(out$date)) else "none"))
 if (nrow(problems)) {
   cat("\nPROBLEMS (logged in problems.csv):\n")
   print(problems[, c("date", "source_file", "reason")], row.names = FALSE)

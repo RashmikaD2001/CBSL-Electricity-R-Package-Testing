@@ -7,9 +7,13 @@ to download or type anything.
 
 ## The data
 
-`dataraw/electricity_generation_data.csv`: one row per day CBSL published,
-from 2020-09-02. CBSL publishes nothing on weekends and holidays, so those days
-have no row.
+`dataraw/electricity_generation_data.csv`: one row per day, from 2020-09-02.
+
+CBSL publishes a PDF on working days only. Since 4 Aug 2022 each PDF also shows
+the day before, so Sundays and holidays have a row too, with energy and peak
+demand only: the percentages come from a pie chart drawn for the PDF's own day.
+Saturdays, and the first day of a longer break, appear in no PDF and have no
+row.
 
 | Column | Meaning |
 |---|---|
@@ -91,6 +95,7 @@ failed workflows" ticked.
 | `.github/workflows/process-inbox.yml` | The GitHub half |
 | `tools/process_inbox.R` | Parses the inbox, applies the safeguards, writes CSV + meta |
 | `tools/extract_electricity_data.R` | Reads one CBSL PDF |
+| `tools/download_pdfs.R` | Downloads CBSL PDFs for a date range to your own computer, for a one-off rebuild (see "Reprocessing old PDFs"). The workflow does not use it |
 | `google-apps-scripts/fetcher.gs` | The Google half. A copy is kept here; it runs in Apps Script |
 | Release `inbox` | A mailbox, not a data release: PDFs waiting for the workflow. Created and emptied automatically, so usually empty |
 | Release `problems` | PDFs that needed a safeguard, kept so they can be parsed again. Exists only after the first problem |
@@ -293,6 +298,27 @@ new PDF, so the limit never matters.
 The page limit `MAX_PAGES: 30` (about 18 months of PDFs) is only a safety
 stop. If the fetcher was off longer than that, it uploads nothing and emails
 "Raise MAX_PAGES"; raise it in `CONFIG`, save, and run **fetchNewPdfs**.
+
+### Reprocessing old PDFs on your computer
+
+For anything the fetcher cannot do in its hourly runs (a gap longer than
+`MAX_PAGES`, or running a changed parser over years of PDFs), run the same
+script on your own computer. CBSL answers Sri Lankan connections. You need R
+and `install.packages("pdftools")`.
+
+```
+Rscript tools/download_pdfs.R 2022-08-04 2026-11-13 ../cbsl_pdfs
+git pull
+Rscript tools/process_inbox.R ../cbsl_pdfs dataraw/electricity_generation_data.csv
+git diff --numstat dataraw/electricity_generation_data.csv
+```
+
+Keep the PDF folder outside the repo. The download can be stopped and run
+again; it skips PDFs it already has. Reprocessing leaves existing rows as they
+are and only adds missing dates, so the second number from `git diff --numstat`
+(lines removed) must be 0. Then commit `dataraw/` and push. The script writes
+`\n` line ends on every system, so the md5 in the meta file matches the file
+GitHub stores.
 
 ### If the meta file is missing
 

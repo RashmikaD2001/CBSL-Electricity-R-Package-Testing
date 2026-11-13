@@ -96,15 +96,21 @@ extract_numbers <- function(text, pattern) {
   suppressWarnings(as.numeric(gsub(",", "", unlist(raw))))
 }
 
-# Dates printed as 03-May-21 / 03-Aug-2022 / 03 Aug 2022
+# Dates printed as 03-May-21 / 03-Aug-2022 / 03 Aug 2022 / 27-Sept-26.
+# The month is matched on its first three letters against English names, so
+# "Sept" and "June" work and the computer's language does not matter.
 extract_dates <- function(text) {
-  pat <- "\\b\\d{1,2}[- ][A-Za-z]{3}[- ]\\d{2,4}\\b"
+  pat <- "\\b(\\d{1,2})[- ]([A-Za-z]{3,9})[- ](\\d{2}|\\d{4})\\b"
   raw <- unlist(regmatches(text, gregexpr(pat, text, perl = TRUE)))
   if (length(raw) == 0L) return(as.Date(character(0)))
-  raw <- gsub(" ", "-", raw)
-  d <- suppressWarnings(as.Date(raw, "%d-%b-%y"))
-  long <- nchar(sub(".*-", "", raw)) == 4L
-  d[long] <- suppressWarnings(as.Date(raw[long], "%d-%b-%Y"))
+  parts <- regmatches(raw, regexec(pat, raw, perl = TRUE))
+  iso <- vapply(parts, function(p) {
+    mon <- match(tolower(substr(p[3L], 1L, 3L)), tolower(month.abb))
+    yr  <- as.integer(p[4L])
+    if (yr < 100L) yr <- 2000L + yr
+    if (is.na(mon)) NA_character_ else sprintf("%04d-%02d-%02d", yr, mon, as.integer(p[2L]))
+  }, character(1))
+  d <- as.Date(iso, format = "%Y-%m-%d")
   d[!is.na(d)]
 }
 
@@ -164,10 +170,16 @@ empty_row <- function(fname, date = as.Date(NA), note = NA_character_) {
     pct_total        = NA_real_,
     source_file      = fname,
     note             = note,
+    is_previous      = FALSE,   # TRUE: the "day before" column of a two-date PDF
     stringsAsFactors = FALSE
   )
 }
 
+# Returns a data.frame with one row for the PDF's own date (the latest date in
+# the box). PDFs from 4 Aug 2022 on show two columns, the day before and the
+# PDF's own day; for those a second row is added for the day before
+# (is_previous = TRUE), with energy and peak only, because the pie chart is for
+# the PDF's own day.
 extract_electricity_data <- function(pdf_path) {
 
   fname <- basename(pdf_path)
@@ -228,6 +240,21 @@ extract_electricity_data <- function(pdf_path) {
     row$note <- sprintf("found %d legend labels but %d percentages",
                         length(legend), length(pct))
   }
+
+  # 6. Two-date PDFs: the left column is the day before. On weekdays that day
+  #    is already in the CSV from its own PDF; after a Sunday or a holiday this
+  #    column is the only place its figures appear. The PDF's own day takes the
+  #    last value (step 4), so the day before takes the other one. Only when
+  #    the box clearly has two dates, a few days apart, and two values of each.
+  dates <- sort(unique(dates))
+  if (length(dates) == 2L && length(energy) == 2L && length(peak) == 2L &&
+      as.integer(dates[2L] - dates[1L]) %in% 1:7) {
+    prev <- empty_row(fname, dates[1L])
+    prev$total_energy_gwh <- energy[1L]
+    prev$peak_demand_mw   <- peak[1L]
+    prev$is_previous      <- TRUE
+    row <- rbind(row, prev)
+  }
   row
 }
 
@@ -275,9 +302,10 @@ extract_electricity_folder <- function(folder = pdf_folder, output = output_csv)
     print(table(problems$note, useNA = "ifany"))
   }
 
-  # One row per date: prefer a row without problems
+  # One row per date: prefer the date's own PDF over another PDF's "day
+  # before" column, then a row without problems
   out <- all_rows[!is.na(all_rows$date), ]
-  out <- out[order(out$date, !is.na(out$note)), ]
+  out <- out[order(out$date, out$is_previous, !is.na(out$note)), ]
   out <- out[!duplicated(out$date), ]
   rownames(out) <- NULL
 
