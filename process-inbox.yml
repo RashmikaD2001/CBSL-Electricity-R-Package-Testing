@@ -1,0 +1,123 @@
+# Parses the CBSL PDFs that the Google Apps Script fetcher put in the "inbox"
+# release, updates the CSV (DATA_CSV below) and its meta file, and empties
+# the inbox. Never contacts CBSL (CBSL blocks GitHub's servers).
+#
+# Started by:
+#   - the fetcher, right after it uploads new PDFs (repository_dispatch)
+#   - a daily timer, which also catches a missed start and checks the data
+#     is not stale
+#   - the "Run workflow" button; tick "reprocess" after fixing the parser to
+#     parse the PDFs parked in the "problems" release again
+name: process-inbox
+
+on:
+  repository_dispatch:
+    types: [new-pdfs]
+  schedule:
+    - cron: "30 6 * * *"          # every day 06:30 UTC = 12:00 Sri Lanka
+  workflow_dispatch:
+    inputs:
+      reprocess:
+        description: "Also parse the PDFs parked in the problems release"
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: process-inbox
+  cancel-in-progress: false
+
+env:
+  GH_TOKEN: ${{ github.token }}
+  # The published CSV. electricity_meta.json and problems.csv live next to it.
+  # Use inst/extdata/electricity.csv once this is an R package.
+  DATA_CSV: dataraw/electricity_generation_data.csv
+  STALE_DAYS: 5                   # alert if no new data for this many days
+
+jobs:
+  process:
+    # Pinned, not ubuntu-latest: that label moves to new Ubuntu versions, and on
+    # a new image installing R can hang or fail for a while. Move up on purpose.
+    runs-on: ubuntu-24.04
+    # A normal run takes 1-4 min. A stuck step fails here instead of blocking
+    # later runs for hours; its PDFs stay in the inbox for the next run.
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Download PDFs from the inbox
+        run: |
+          mkdir -p inbox
+          if gh release view inbox >/dev/null 2>&1; then
+            gh release download inbox --dir inbox --pattern "*.pdf" || true
+          fi
+          if [ "${{ inputs.reprocess }}" = "true" ] && gh release view problems >/dev/null 2>&1; then
+            gh release download problems --dir inbox --pattern "*.pdf" --skip-existing || true
+          fi
+          echo "PDFs waiting: $(ls inbox/*.pdf 2>/dev/null | wc -l)"
+
+      - uses: r-lib/actions/setup-r@v2
+        with:
+          use-public-rspm: true
+
+      - uses: r-lib/actions/setup-r-dependencies@v2
+        with:
+          packages: any::pdftools
+
+      - name: Parse PDFs and update the CSV
+        run: Rscript tools/process_inbox.R inbox "$DATA_CSV"
+
+      - name: Commit and push
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "$(dirname "$DATA_CSV")"
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "data: update $(date -u +%F)"
+            git push
+          fi
+
+      # Only after the push succeeded: park problem PDFs, then empty the inbox.
+      - name: Park problem PDFs and empty the inbox
+        run: |
+          shopt -s nullglob
+          if [ -s inbox/problem_files.txt ]; then
+            gh release view problems >/dev/null 2>&1 || \
+              gh release create problems --prerelease --title "PDFs that need checking" \
+                --notes "PDFs the parser could not read fully. Fix the parser, then run process-inbox with 'reprocess' ticked."
+            while read -r f; do
+              [ -n "$f" ] && gh release upload problems "inbox/$f" --clobber
+            done < inbox/problem_files.txt
+          fi
+          for path in inbox/*.pdf; do
+            f=$(basename "$path")
+            gh release delete-asset inbox "$f" -y 2>/dev/null || true
+            if ! grep -qxF "$f" inbox/problem_files.txt; then
+              gh release delete-asset problems "$f" -y 2>/dev/null || true
+            fi
+          done
+
+      - name: Fail if any PDF had a problem
+        run: |
+          if [ -s inbox/problem_files.txt ]; then
+            echo "These PDFs needed a safeguard (details in problems.csv next to the CSV):"
+            cat inbox/problem_files.txt
+            echo "The data was still published. Fix the parser, then run this workflow with 'reprocess' ticked."
+            exit 1
+          fi
+
+      - name: Check the data is not stale
+        if: github.event_name == 'schedule'
+        run: |
+          updated=$(jq -r '.updated // empty' "$(dirname "$DATA_CSV")/electricity_meta.json" 2>/dev/null || true)
+          if [ -z "$updated" ]; then echo "No meta file yet."; exit 0; fi
+          age=$(( ( $(date -u +%s) - $(date -u -d "$updated" +%s) ) / 86400 ))
+          echo "Data last changed $age day(s) ago ($updated)."
+          if [ "$age" -gt "$STALE_DAYS" ]; then
+            echo "No new data for more than $STALE_DAYS days. Check the Apps Script fetcher's executions and the inbox release."
+            exit 1
+          fi
