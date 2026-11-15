@@ -1,7 +1,7 @@
 # Parse the PDFs waiting in the inbox folder and update the published data.
 #
 # Usage:  Rscript tools/process_inbox.R [inbox_dir] [csv_file]
-#         defaults: inbox  inst/extdata/electricity.csv
+#         defaults: inbox  dataraw/electricity_generation_data.csv
 #
 # Reads    <inbox_dir>/*.pdf   (downloaded from the "inbox" release by the workflow)
 # Updates, in the folder of <csv_file>:
@@ -37,7 +37,7 @@
 
 args     <- commandArgs(trailingOnly = TRUE)
 inbox    <- if (length(args) >= 1L) args[1L] else "inbox"
-csv_path <- if (length(args) >= 2L) args[2L] else "inst/extdata/electricity.csv"
+csv_path <- if (length(args) >= 2L) args[2L] else "dataraw/electricity_generation_data.csv"
 extdata  <- dirname(csv_path)
 
 this_file <- sub("^--file=", "", grep("^--file=", commandArgs(FALSE), value = TRUE))
@@ -49,7 +49,9 @@ CSV_COLS <- c("date", "total_energy_gwh", "peak_demand_mw",
               "pct_wind", "pct_solar", "pct_biomass")
 EP_COLS  <- c("date", "total_energy_gwh", "peak_demand_mw")
 PCT_COLS <- grep("^pct_", CSV_COLS, value = TRUE)
-PDF_RE   <- "^(daily_economic_indicators_\\d{8}_e|DEI_\\d{2}_\\d{2}_\\d{4})\\.pdf$"
+# CBSL sometimes adds an ending after the date (..._20260907_e_0.pdf, _e_1, _e1,
+# ._e), so anything between the date and ".pdf" is accepted.
+PDF_RE   <- "^(daily_economic_indicators_\\d{8}|DEI_\\d{2}_\\d{2}_\\d{4})[^/]*\\.pdf$"
 
 ep_path   <- file.path(extdata, "electricity_energy_peak_data.csv")
 meta_path <- file.path(extdata, "electricity_meta.json")

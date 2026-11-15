@@ -17,7 +17,7 @@
  * CONFIG.FAILS_BEFORE_ALERT failed runs in a row, or for problems on the
  * GitHub side (token).
  *
- * One-time setup is in SETUP.md. In short:
+ * Setup is in the repo's README.md. In short:
  *   - fill in CONFIG below,
  *   - Project Settings -> Script properties -> add GITHUB_TOKEN,
  *   - run "fetchNewPdfs" once to check it works,
@@ -33,7 +33,6 @@ var CONFIG = {
   BRANCH: 'main',
   // The published CSV: must be the same as DATA_CSV in process-inbox.yml.
   // electricity_meta.json is read from the same folder.
-  // Use 'inst/extdata/electricity.csv' once this is an R package.
   DATA_CSV: 'dataraw/electricity_generation_data.csv',
 
   // Where to continue from is read from the meta file; if that is missing,
@@ -196,10 +195,13 @@ function cbslReached_() {
   }
 }
 
+// The date in a CBSL file name. CBSL sometimes adds an ending after the date,
+// e.g. daily_economic_indicators_20260907_e_0.pdf, _e_1.pdf, _e1.pdf or ._e.pdf,
+// so anything between the date and ".pdf" is accepted.
 function dateFromName_(name) {
-  var m = name.match(/daily_economic_indicators_(\d{4})(\d{2})(\d{2})_e\.pdf$/i);
+  var m = name.match(/daily_economic_indicators_(\d{4})(\d{2})(\d{2})[^\/]*\.pdf$/i);
   if (m) return m[1] + '-' + m[2] + '-' + m[3];
-  m = name.match(/DEI_(\d{2})_(\d{2})_(\d{4})\.pdf$/i);
+  m = name.match(/DEI_(\d{2})_(\d{2})_(\d{4})[^\/]*\.pdf$/i);
   if (m) return m[3] + '-' + m[2] + '-' + m[1];
   return null;
 }

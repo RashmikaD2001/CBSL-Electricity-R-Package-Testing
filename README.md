@@ -117,13 +117,17 @@ failed workflows" ticked.
 | Release `problems` | PDFs that needed a safeguard, kept so they can be parsed again. Exists only after the first problem |
 
 The CSV path is set in **two places**, with the same value. Change both
-together if you move the CSV (for the R package it becomes
-`inst/extdata/electricity.csv`):
+together if you move the CSV:
 
 - `process-inbox.yml`: `DATA_CSV: dataraw/electricity_generation_data.csv`
 - `fetcher.gs`: `DATA_CSV: 'dataraw/electricity_generation_data.csv'`
 
-The meta file is always read from and written to the CSV's folder.
+The energy-and-peak CSV and the meta file are always read from and written to
+the full CSV's folder.
+
+CBSL sometimes adds an ending after the date in a file name
+(`daily_economic_indicators_20260907_e_0.pdf`, `_e_1`, `_e1`, `._e`). The
+fetcher and the R scripts accept any ending between the date and `.pdf`.
 
 ## Setting up the pipeline
 
@@ -368,8 +372,8 @@ one.
 1. **New repo:** copy both CSVs (and `electricity_meta.json` if you like; it is
    optional; without the energy-and-peak CSV, its Sundays and holidays before
    the move are lost), `.github/workflows/process-inbox.yml` and the R scripts. If the
-   path changes (e.g. `inst/extdata/electricity.csv`), set `DATA_CSV` in the
-   workflow. Commit and push.
+   path changes, set `DATA_CSV` in the workflow and in `fetcher.gs`. Commit and
+   push.
 2. **Token:** GitHub -> Settings -> Developer settings -> Fine-grained tokens ->
    `cbsl-fetcher` -> **Repository access** -> add the new repo (or make a new
    token as in setup step 3). If you made a new token, replace `GITHUB_TOKEN`

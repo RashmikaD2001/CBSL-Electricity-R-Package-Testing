@@ -279,7 +279,7 @@ debug_pdf <- function(pdf_path) {
 
 extract_electricity_folder <- function(folder = pdf_folder, output = output_csv) {
   pdf_files <- list.files(folder,
-                          pattern = "^(daily_economic_indicators_\\d{8}_e|DEI_\\d{2}_\\d{2}_\\d{4})\\.pdf$",
+                          pattern = "^(daily_economic_indicators_\\d{8}|DEI_\\d{2}_\\d{2}_\\d{4})[^/]*\\.pdf$",
                           full.names = TRUE, ignore.case = TRUE)
   if (length(pdf_files) == 0L) stop("No daily indicator PDFs found in: ", folder)
   cat(sprintf("Found %d PDF files.\n", length(pdf_files)))
