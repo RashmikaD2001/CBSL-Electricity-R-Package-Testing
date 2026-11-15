@@ -78,7 +78,15 @@ jobs:
             echo "No data changes."
           else
             git commit -m "data: update $(date -u +%F)"
-            git push
+            pushed=false
+            for i in 1 2 3; do
+              if git pull --rebase origin main && git push; then
+                pushed=true; break
+              fi
+              git rebase --abort 2>/dev/null || true
+              echo "Push failed, retry $i"; sleep $((i * 5))
+            done
+            $pushed || { echo "Could not push after 3 tries. Inbox left untouched for the next run."; exit 1; }
           fi
 
       # Only after the push succeeded: park problem PDFs, then empty the inbox.
